@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
+import JSZip from 'jszip';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -149,22 +150,39 @@ function extractDescriptionChapters(playerResponse) {
   return [];
 }
 
-async function fetchVideoChapters(videoId) {
+// Fetch chapters + metadata from watch page in a single request
+async function fetchVideoPageData(videoId) {
+  const result = { chapters: [], title: '', author: '', thumbnailUrl: '' };
   try {
     const html = await fetchWatchPageHtml(videoId);
     const playerResponseJson = extractJsonObject(html, 'var ytInitialPlayerResponse =') ||
       extractJsonObject(html, 'ytInitialPlayerResponse =');
 
-    if (!playerResponseJson) {
-      return [];
-    }
+    if (!playerResponseJson) return result;
 
     const playerResponse = JSON.parse(playerResponseJson);
-    return extractDescriptionChapters(playerResponse);
+    result.chapters = extractDescriptionChapters(playerResponse);
+
+    // Extract video metadata from playerResponse
+    const vd = playerResponse?.videoDetails;
+    if (vd) {
+      result.title = vd.title || '';
+      result.author = vd.author || '';
+      const thumbs = vd.thumbnail?.thumbnails;
+      if (Array.isArray(thumbs) && thumbs.length > 0) {
+        result.thumbnailUrl = thumbs[thumbs.length - 1].url || '';
+      }
+    }
   } catch (error) {
-    console.warn(`[API] Failed to fetch chapters for ${videoId}:`, error.message);
-    return [];
+    console.warn(`[API] Failed to fetch page data for ${videoId}:`, error.message);
   }
+  return result;
+}
+
+// Backward compat wrapper
+async function fetchVideoChapters(videoId) {
+  const data = await fetchVideoPageData(videoId);
+  return data.chapters;
 }
 
 // GET /api/transcript?url=YOUTUBE_URL&lang=zh

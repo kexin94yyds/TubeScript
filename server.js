@@ -150,9 +150,169 @@ function extractDescriptionChapters(playerResponse) {
   return [];
 }
 
+function decodeHtmlEntities(text) {
+  return String(text || '')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#10;/g, '\n')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function selectPreferredCaptionTrack(captionTracks, requestedLang) {
+  if (!Array.isArray(captionTracks) || captionTracks.length === 0) {
+    return null;
+  }
+
+  const requested = typeof requestedLang === 'string' ? requestedLang.toLowerCase() : '';
+  const priorities = requested ? [requested] : ['zh-hans', 'zh-hant', 'zh', 'en'];
+
+  for (const language of priorities) {
+    const exact = captionTracks.find((track) =>
+      typeof track?.languageCode === 'string' &&
+      track.languageCode.toLowerCase() === language &&
+      !track.kind
+    );
+    if (exact) return exact;
+  }
+
+  for (const language of priorities) {
+    const fuzzy = captionTracks.find((track) =>
+      typeof track?.languageCode === 'string' &&
+      track.languageCode.toLowerCase().startsWith(language)
+    );
+    if (fuzzy) return fuzzy;
+  }
+
+  return captionTracks.find((track) => !track.kind) || captionTracks[0];
+}
+
+function buildTranscriptCandidateUrls(baseUrl) {
+  if (typeof baseUrl !== 'string' || !baseUrl.trim()) {
+    return [];
+  }
+
+  const formats = [null, 'json3', 'srv3'];
+  const urls = [];
+
+  for (const format of formats) {
+    try {
+      const url = new URL(baseUrl);
+      if (format) {
+        url.searchParams.set('fmt', format);
+      }
+      const href = url.toString();
+      if (!urls.includes(href)) {
+        urls.push(href);
+      }
+    } catch (error) {
+      console.warn('[API] Failed to build transcript URL:', error.message);
+    }
+  }
+
+  return urls;
+}
+
+function parseJson3Transcript(jsonText) {
+  const data = JSON.parse(jsonText);
+  const events = Array.isArray(data?.events) ? data.events : [];
+
+  return events.map((event) => {
+    const segs = Array.isArray(event?.segs) ? event.segs : [];
+    const text = segs.map((seg) => seg?.utf8 || '').join('');
+    const startMs = Number(event?.tStartMs);
+    const durationMs = Number(event?.dDurationMs);
+
+    return {
+      start: startMs / 1000,
+      end: startMs / 1000 + (Number.isFinite(durationMs) ? durationMs / 1000 : 3),
+      text: decodeHtmlEntities(text)
+    };
+  }).filter((segment) => Number.isFinite(segment.start) && segment.text);
+}
+
+function parseXmlTranscript(xmlText) {
+  const segments = [];
+  const textMatches = Array.from(xmlText.matchAll(/<text\b([^>]*)>([\s\S]*?)<\/text>/g));
+
+  if (textMatches.length > 0) {
+    for (const [, attrs, content] of textMatches) {
+      const start = Number(attrs.match(/\bstart="([^"]+)"/)?.[1] || '');
+      const duration = Number(attrs.match(/\bdur="([^"]+)"/)?.[1] || '3');
+      const text = decodeHtmlEntities(content.replace(/<[^>]+>/g, ''));
+
+      if (Number.isFinite(start) && text) {
+        segments.push({
+          start,
+          end: start + (Number.isFinite(duration) ? duration : 3),
+          text
+        });
+      }
+    }
+
+    return segments;
+  }
+
+  const paragraphMatches = Array.from(xmlText.matchAll(/<p\b([^>]*)>([\s\S]*?)<\/p>/g));
+  for (const [, attrs, content] of paragraphMatches) {
+    const startMs = Number(attrs.match(/\bt="([^"]+)"/)?.[1] || '');
+    const durationMs = Number(attrs.match(/\bd="([^"]+)"/)?.[1] || '3000');
+    const segMatches = Array.from(content.matchAll(/<s\b[^>]*>([\s\S]*?)<\/s>/g));
+    const rawText = segMatches.length > 0
+      ? segMatches.map((match) => match[1]).join('')
+      : content.replace(/<[^>]+>/g, '');
+    const text = decodeHtmlEntities(rawText);
+
+    if (Number.isFinite(startMs) && text) {
+      segments.push({
+        start: startMs / 1000,
+        end: startMs / 1000 + (Number.isFinite(durationMs) ? durationMs / 1000 : 3),
+        text
+      });
+    }
+  }
+
+  return segments;
+}
+
+function parseTranscriptPayload(payloadText) {
+  const trimmed = typeof payloadText === 'string' ? payloadText.trim() : '';
+  if (!trimmed) {
+    return [];
+  }
+
+  try {
+    if (trimmed.startsWith('{')) {
+      return parseJson3Transcript(trimmed);
+    }
+    return parseXmlTranscript(trimmed);
+  } catch (error) {
+    console.warn('[API] Failed to parse transcript payload:', error.message);
+    return [];
+  }
+}
+
+async function fetchTranscriptPayload(url) {
+  const response = await fetch(url, {
+    headers: {
+      'accept-language': 'en-US,en;q=0.9',
+      'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36'
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`Transcript track request failed (${response.status})`);
+  }
+
+  return await response.text();
+}
+
 // Fetch chapters + metadata from watch page in a single request
 async function fetchVideoPageData(videoId) {
-  const result = { chapters: [], title: '', author: '', thumbnailUrl: '' };
+  const result = { chapters: [], title: '', author: '', thumbnailUrl: '', playerResponse: null };
   try {
     const html = await fetchWatchPageHtml(videoId);
     const playerResponseJson = extractJsonObject(html, 'var ytInitialPlayerResponse =') ||
@@ -161,6 +321,7 @@ async function fetchVideoPageData(videoId) {
     if (!playerResponseJson) return result;
 
     const playerResponse = JSON.parse(playerResponseJson);
+    result.playerResponse = playerResponse;
     result.chapters = extractDescriptionChapters(playerResponse);
 
     // Extract video metadata from playerResponse
@@ -185,6 +346,52 @@ async function fetchVideoChapters(videoId) {
   return data.chapters;
 }
 
+async function fetchTranscriptViaCaptionTracks(videoId, requestedLang) {
+  const pageData = await fetchVideoPageData(videoId);
+  const playerResponse = pageData.playerResponse;
+  const captionTracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+
+  if (!Array.isArray(captionTracks) || captionTracks.length === 0) {
+    return {
+      segments: [],
+      chapters: pageData.chapters,
+      languageCode: null
+    };
+  }
+
+  const selectedTrack = selectPreferredCaptionTrack(captionTracks, requestedLang);
+  if (!selectedTrack?.baseUrl) {
+    return {
+      segments: [],
+      chapters: pageData.chapters,
+      languageCode: null
+    };
+  }
+
+  const candidateUrls = buildTranscriptCandidateUrls(selectedTrack.baseUrl);
+  for (const candidateUrl of candidateUrls) {
+    try {
+      const payloadText = await fetchTranscriptPayload(candidateUrl);
+      const segments = parseTranscriptPayload(payloadText);
+      if (segments.length > 0) {
+        return {
+          segments,
+          chapters: pageData.chapters,
+          languageCode: selectedTrack.languageCode || null
+        };
+      }
+    } catch (error) {
+      console.warn(`[API] Caption track fetch failed for ${candidateUrl}:`, error.message);
+    }
+  }
+
+  return {
+    segments: [],
+    chapters: pageData.chapters,
+    languageCode: selectedTrack.languageCode || null
+  };
+}
+
 // GET /api/transcript?url=YOUTUBE_URL&lang=zh
 app.get('/api/transcript', async (req, res) => {
   const { url, lang } = req.query;
@@ -200,14 +407,30 @@ app.get('/api/transcript', async (req, res) => {
   
   try {
     console.log(`[API] Fetching transcript for video: ${videoId}, lang: ${lang || 'auto'}`);
-    
+
+    const captionTrackResult = await fetchTranscriptViaCaptionTracks(videoId, lang);
+    if (captionTrackResult.segments.length > 0) {
+      console.log(`[API] Got ${captionTrackResult.segments.length} segments via captionTracks`);
+      console.log(`[API] Got ${captionTrackResult.chapters.length} chapters via watch page`);
+
+      return res.json({
+        videoId,
+        segments: captionTrackResult.segments,
+        segmentCount: captionTrackResult.segments.length,
+        chapters: captionTrackResult.chapters,
+        fallbackLang: !lang && captionTrackResult.languageCode ? captionTrackResult.languageCode : undefined
+      });
+    }
+
     const options = {};
     if (lang) {
       options.lang = lang;
     }
     
     const transcript = await YoutubeTranscript.fetchTranscript(videoId, options);
-    const chapters = await fetchVideoChapters(videoId);
+    const chapters = captionTrackResult.chapters.length > 0
+      ? captionTrackResult.chapters
+      : await fetchVideoChapters(videoId);
     
     if (!transcript || transcript.length === 0) {
       return res.status(404).json({ error: 'No transcript available for this video' });
@@ -217,7 +440,7 @@ app.get('/api/transcript', async (req, res) => {
     const segments = transcript.map(item => ({
       start: item.offset,
       end: item.offset + item.duration,
-      text: item.text.replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/\n/g, ' ').trim()
+      text: decodeHtmlEntities((item.text || '').replace(/\n/g, ' '))
     })).filter(seg => seg.text);
     
     console.log(`[API] Got ${segments.length} segments`);
@@ -237,13 +460,26 @@ app.get('/api/transcript', async (req, res) => {
     if (!lang) {
       try {
         console.log(`[API] Retrying with lang=en...`);
+        const captionTrackResult = await fetchTranscriptViaCaptionTracks(videoId, 'en');
+        if (captionTrackResult.segments.length > 0) {
+          return res.json({
+            videoId,
+            segments: captionTrackResult.segments,
+            segmentCount: captionTrackResult.segments.length,
+            chapters: captionTrackResult.chapters,
+            fallbackLang: captionTrackResult.languageCode || 'en'
+          });
+        }
+
         const transcript = await YoutubeTranscript.fetchTranscript(videoId, { lang: 'en' });
         if (transcript && transcript.length > 0) {
-          const chapters = await fetchVideoChapters(videoId);
+          const chapters = captionTrackResult.chapters.length > 0
+            ? captionTrackResult.chapters
+            : await fetchVideoChapters(videoId);
           const segments = transcript.map(item => ({
             start: item.offset,
             end: item.offset + item.duration,
-            text: item.text.replace(/&#39;/g, "'").replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/\n/g, ' ').trim()
+            text: decodeHtmlEntities((item.text || '').replace(/\n/g, ' '))
           })).filter(seg => seg.text);
           
           return res.json({

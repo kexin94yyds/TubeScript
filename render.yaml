@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: tubescript-splitter
+    env: node
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    autoDeploy: true

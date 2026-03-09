@@ -1,18 +1,30 @@
 import express from 'express';
 import cors from 'cors';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { ProxyAgent, setGlobalDispatcher } from 'undici';
 
-// Use system proxy for YouTube access
-const PROXY_URL = process.env.https_proxy || process.env.HTTPS_PROXY || process.env.http_proxy || process.env.HTTP_PROXY || 'http://127.0.0.1:7897';
-console.log(`[API] Using proxy: ${PROXY_URL}`);
-const proxyAgent = new ProxyAgent(PROXY_URL);
-setGlobalDispatcher(proxyAgent);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const DIST_DIR = path.join(__dirname, 'dist');
+const INDEX_HTML = path.join(DIST_DIR, 'index.html');
+
+// Use proxy only when explicitly configured. A hardcoded local proxy breaks cloud deployment.
+const PROXY_URL = process.env.https_proxy || process.env.HTTPS_PROXY || process.env.http_proxy || process.env.HTTP_PROXY;
+if (PROXY_URL) {
+  console.log(`[API] Using proxy: ${PROXY_URL}`);
+  const proxyAgent = new ProxyAgent(PROXY_URL);
+  setGlobalDispatcher(proxyAgent);
+} else {
+  console.log('[API] No proxy configured, using direct outbound network');
+}
 
 // Now import after proxy is set
 const { YoutubeTranscript } = await import('youtube-transcript-plus');
 
 const app = express();
-const PORT = 3099;
+const PORT = Number(process.env.PORT || 3099);
 
 app.use(cors());
 app.use(express.json());
@@ -236,6 +248,23 @@ app.get('/api/transcript', async (req, res) => {
   }
 });
 
+app.get('/api/health', (_req, res) => {
+  res.json({
+    ok: true,
+    hasDist: fs.existsSync(INDEX_HTML)
+  });
+});
+
+if (fs.existsSync(DIST_DIR)) {
+  app.use(express.static(DIST_DIR));
+
+  app.get(/^(?!\/api).*/, (_req, res) => {
+    res.sendFile(INDEX_HTML);
+  });
+} else {
+  console.warn('[API] dist directory not found. Frontend assets are not being served.');
+}
+
 app.listen(PORT, () => {
-  console.log(`[API] Transcript server running at http://localhost:${PORT}`);
+  console.log(`[API] Server running on port ${PORT}`);
 });

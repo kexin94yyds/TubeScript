@@ -11,66 +11,126 @@ function escapeXml(str: string): string {
     .replace(/'/g, '&apos;');
 }
 
-export const generateEpubBlob = async (title: string, author: string, chapters: Chapter[], coverUrl?: string, videoUrl?: string): Promise<Blob> => {
-  const zip = new JSZip();
-
-  // 1. mimetype (must be first, uncompressed)
-  zip.file("mimetype", "application/epub+zip", { compression: "STORE" });
-
-  // 2. META-INF/container.xml
-  zip.folder("META-INF")?.file("container.xml", `<?xml version="1.0"?>
-<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
-   <rootfiles>
-      <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
-   </rootfiles>
-</container>`);
-
-  // 3. OEBPS folder
-  const oebps = zip.folder("OEBPS");
-  if (!oebps) throw new Error("Failed to create OEBPS folder");
-
-  // Handle Cover Image
-  let coverImageItem = '';
-  let coverImageRef = '';
-  let coverPageItem = '';
-  let coverPageRef = '';
-
-  // Try to fetch cover image
-  let hasCoverImage = false;
-  let coverFilename = 'cover.jpeg';
-  if (coverUrl) {
-    try {
-        const imgResp = await fetch(coverUrl, { mode: 'cors' }).catch(() => null);
-        if (imgResp && imgResp.ok) {
-            const imgBlob = await imgResp.blob();
-            const extension = imgBlob.type.split('/')[1] || 'jpeg';
-            coverFilename = `cover.${extension}`;
-            oebps.file(coverFilename, imgBlob);
-            coverImageItem = `<item id="cover-image" href="${coverFilename}" media-type="${imgBlob.type}" properties="cover-image"/>`;
-            hasCoverImage = true;
-        } else {
-          console.warn("Could not fetch cover image. Skipping.");
-        }
-    } catch (e) {
-        console.warn("Failed to process cover image", e);
-    }
+function generateUuid(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
   }
 
-  // Generate cover page (matching YouTube-Transcript extension style)
-  {
-    const titleHtml = videoUrl
-      ? `<a href="${escapeXml(videoUrl)}" class="title-link">${escapeXml(title)}</a>`
-      : escapeXml(title);
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char) => {
+    const rand = Math.random() * 16 | 0;
+    const value = char === 'x' ? rand : (rand & 0x3 | 0x8);
+    return value.toString(16);
+  });
+}
 
-    const copyBtnHtml = videoUrl
-      ? `\n      <button class="copy-btn" onclick="navigator.clipboard.writeText('${escapeXml(videoUrl)}')">Copy</button>`
-      : '';
+function formatTime(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (h > 0) {
+    return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  }
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
 
-    const imageHtml = hasCoverImage
-      ? `\n    <div class="cover-image-container">\n      <img src="${coverFilename}" alt="Cover"/>\n    </div>` 
-      : '';
+function generateStyle(): string {
+  return `/* EPUB 样式 */
+body {
+  font-family: "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", sans-serif;
+  line-height: 1.8;
+  margin: 1em;
+  padding: 0;
+  color: #333;
+  background: #fff;
+}
 
-    const coverXhtml = `<?xml version="1.0" encoding="UTF-8"?>
+h1 {
+  font-size: 1.5em;
+  color: #1a1a1a;
+  margin-bottom: 1em;
+  padding-bottom: 0.5em;
+  border-bottom: 2px solid #3b82f6;
+}
+
+h2 {
+  font-size: 1.3em;
+  color: #1f2937;
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
+}
+
+p {
+  margin: 0.5em 0;
+  text-align: justify;
+}
+
+.timestamp {
+  color: #6b7280;
+  font-size: 0.85em;
+  font-family: monospace;
+  margin-right: 0.5em;
+}
+
+.segment {
+  margin: 0.3em 0;
+  padding: 0.2em 0;
+}
+
+.merged-paragraph {
+  text-indent: 2em;
+  margin: 1em 0;
+  line-height: 2;
+}
+
+.chapter-header {
+  margin-top: 2em;
+  margin-bottom: 1em;
+}
+
+.chapter-time {
+  color: #3b82f6;
+  font-size: 0.9em;
+  font-weight: normal;
+}
+
+nav#toc ol {
+  list-style-type: decimal;
+  padding-left: 1.5em;
+}
+
+nav#toc li {
+  margin: 0.5em 0;
+}
+
+nav#toc a {
+  color: #3b82f6;
+  text-decoration: none;
+}
+
+nav#toc a:hover {
+  text-decoration: underline;
+}
+`;
+}
+
+function generateCoverPage(title: string, videoUrl?: string, coverHref?: string): string {
+  const titleHtml = videoUrl
+    ? `<a href="${escapeXml(videoUrl)}" class="title-link">${escapeXml(title)}</a>`
+    : escapeXml(title);
+
+  const copyAction = videoUrl
+    ? escapeXml(`navigator.clipboard.writeText(${JSON.stringify(videoUrl)})`)
+    : '';
+
+  const copyBtnHtml = videoUrl
+    ? `\n      <button class="copy-btn" onclick="${copyAction}">Copy</button>`
+    : '';
+
+  const imageHtml = coverHref
+    ? `\n    <div class="cover-image-container">\n      <img src="${escapeXml(coverHref)}" alt="封面"/>\n    </div>`
+    : '';
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
@@ -149,162 +209,167 @@ export const generateEpubBlob = async (title: string, author: string, chapters: 
   </div>
 </body>
 </html>`;
-    oebps.file("cover.xhtml", coverXhtml);
-    coverPageItem = `<item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>`;
-    coverPageRef = `<itemref idref="cover" linear="yes"/>`;
-  }
-
-  // CSS - Matching YouTube-Transcript extension style
-  oebps.file("styles.css", `
-body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  line-height: 1.8;
-  padding: 5%;
-  color: #1a1a1a;
-  background-color: #ffffff;
 }
 
-h1 {
-  font-size: 1.5em;
-  margin-top: 1.5em;
-  margin-bottom: 0.5em;
-}
+function generateChapterXhtml(chapter: Chapter): string {
+  const timeStr = chapter.startTime != null
+    ? ` <span class="chapter-time">[${formatTime(chapter.startTime)}]</span>`
+    : '';
 
-h2 {
-  color: #333;
-  margin-top: 1.2em;
-}
-
-p {
-  margin: 0.5em 0;
-  text-align: justify;
-}
-
-.chapter-header {
-  margin-top: 2em;
-  margin-bottom: 1em;
-}
-
-.chapter-time {
-  color: #3b82f6;
-  font-size: 0.9em;
-  font-weight: normal;
-}
-
-.merged-paragraph {
-  text-indent: 2em;
-  margin: 1em 0;
-  line-height: 2;
-}
-
-img {
-  max-width: 100%;
-}
-  `);
-
-  // Content Files (XHTML) - Matching YouTube-Transcript extension format
-  chapters.forEach((chapter, index) => {
-    const filename = `chapter_${index + 1}.xhtml`;
-    
-    // Format time as H:MM:SS or M:SS
-    const formatTime = (seconds: number): string => {
-      const h = Math.floor(seconds / 3600);
-      const m = Math.floor((seconds % 3600) / 60);
-      const s = Math.floor(seconds % 60);
-      if (h > 0) {
-        return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-      }
-      return `${m}:${String(s).padStart(2, '0')}`;
-    };
-
-    // Chapter content as merged paragraph (matching extension style)
-    const mergedText = escapeXml(chapter.content);
-    const timeStr = chapter.startTime != null ? ` <span class="chapter-time">[${formatTime(chapter.startTime)}]</span>` : '';
-
-    const content = `<?xml version="1.0" encoding="UTF-8"?>
+  return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
   <meta charset="UTF-8"/>
   <title>${escapeXml(chapter.title)}</title>
-  <link rel="stylesheet" type="text/css" href="styles.css"/>
+  <link rel="stylesheet" type="text/css" href="style.css"/>
 </head>
 <body>
   <div class="chapter-header">
     <h1>${escapeXml(chapter.title)}${timeStr}</h1>
   </div>
   <div class="chapter-content">
-    <p class="merged-paragraph">${mergedText}</p>
+    <p class="merged-paragraph">${escapeXml(chapter.content)}</p>
   </div>
 </body>
 </html>`;
-    oebps.file(filename, content);
-  });
+}
 
-  // TOC.ncx (Navigation)
-  let navPoints = '';
-  let playOrder = 1;
-  
-  if (coverPageRef) {
-      navPoints += `
-    <navPoint id="navPoint-cover" playOrder="${playOrder++}">
-      <navLabel><text>Cover</text></navLabel>
-      <content src="cover.xhtml"/>
-    </navPoint>`;
-  }
+function generateNavXhtml(chapters: Chapter[]): string {
+  const navItems = chapters
+    .map((chapter, index) => `        <li><a href="chapter${index + 1}.xhtml">${escapeXml(chapter.title)}</a></li>`)
+    .join('\n');
 
-  chapters.forEach((chapter, index) => {
-    navPoints += `
-    <navPoint id="navPoint-${index + 1}" playOrder="${playOrder++}">
-      <navLabel><text>${escapeXml(chapter.title)}</text></navLabel>
-      <content src="chapter_${index + 1}.xhtml"/>
-    </navPoint>`;
-  });
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head>
+  <meta charset="UTF-8"/>
+  <title>目录</title>
+  <link rel="stylesheet" type="text/css" href="style.css"/>
+</head>
+<body>
+  <nav epub:type="toc" id="toc">
+    <h1>目录</h1>
+    <ol>
+${navItems}
+    </ol>
+  </nav>
+</body>
+</html>`;
+}
 
-  oebps.file("toc.ncx", `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN"
- "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">
+function generateTocNcx(bookId: string, title: string, chapters: Chapter[]): string {
+  const navPoints = chapters.map((chapter, index) => `
+    <navPoint id="navpoint${index + 1}" playOrder="${index + 1}">
+      <navLabel>
+        <text>${escapeXml(chapter.title)}</text>
+      </navLabel>
+      <content src="chapter${index + 1}.xhtml"/>
+    </navPoint>`).join('');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
   <head>
-    <meta name="dtb:uid" content="urn:uuid:12345" />
-    <meta name="dtb:depth" content="1" />
-    <meta name="dtb:totalPageCount" content="0" />
-    <meta name="dtb:maxPageNumber" content="0" />
+    <meta name="dtb:uid" content="urn:uuid:${bookId}"/>
+    <meta name="dtb:depth" content="1"/>
+    <meta name="dtb:totalPageCount" content="0"/>
+    <meta name="dtb:maxPageNumber" content="0"/>
   </head>
-  <docTitle><text>${escapeXml(title)}</text></docTitle>
-  <navMap>${navPoints}</navMap>
-</ncx>`);
+  <docTitle>
+    <text>${escapeXml(title)}</text>
+  </docTitle>
+  <navMap>${navPoints}
+  </navMap>
+</ncx>`;
+}
 
-  // Content.opf (Manifest)
-  let manifestItems = `
-    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml" />
-    <item id="css" href="styles.css" media-type="text/css" />
-    ${coverImageItem}
-    ${coverPageItem}`;
+function generateContentOpf(bookId: string, title: string, author: string, chapters: Chapter[], coverHref?: string, coverMediaType?: string): string {
+  const now = new Date().toISOString();
+  const coverManifest = `
+    <item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>${coverHref && coverMediaType ? `
+    <item id="cover-image" href="${escapeXml(coverHref)}" media-type="${escapeXml(coverMediaType)}" properties="cover-image"/>` : ''}`;
 
-  let spineItems = `${coverPageRef}`;
-  
-  chapters.forEach((_, index) => {
-    manifestItems += `<item id="chapter_${index+1}" href="chapter_${index+1}.xhtml" media-type="application/xhtml+xml" />\n`;
-    spineItems += `<itemref idref="chapter_${index+1}" />\n`;
-  });
+  const manifestItems = chapters
+    .map((_, index) => `    <item id="chapter${index + 1}" href="chapter${index + 1}.xhtml" media-type="application/xhtml+xml"/>`)
+    .join('\n');
 
-  oebps.file("content.opf", `<?xml version="1.0" encoding="utf-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId" version="2.0">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
+  const spineItems = chapters
+    .map((_, index) => `    <itemref idref="chapter${index + 1}"/>`)
+    .join('\n');
+
+  const coverMeta = coverHref && coverMediaType ? '\n    <meta name="cover" content="cover-image"/>' : '';
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="uid">urn:uuid:${bookId}</dc:identifier>
     <dc:title>${escapeXml(title)}</dc:title>
     <dc:creator>${escapeXml(author)}</dc:creator>
-    <dc:language>en</dc:language>
-    <dc:identifier id="BookId" opf:scheme="UUID">urn:uuid:12345</dc:identifier>
-    ${coverImageRef ? '<meta name="cover" content="cover-image" />' : ''}
+    <dc:language>zh-CN</dc:language>
+    <dc:date>${now}</dc:date>
+    <meta property="dcterms:modified">${now.split('.')[0]}Z</meta>${coverMeta}
   </metadata>
   <manifest>
-    ${manifestItems}
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
+    <item id="css" href="style.css" media-type="text/css"/>${coverManifest}
+${manifestItems}
   </manifest>
   <spine toc="ncx">
-    ${spineItems}
+    <itemref idref="cover"/>
+${spineItems}
   </spine>
-</package>`);
+</package>`;
+}
+
+export const generateEpubBlob = async (title: string, author: string, chapters: Chapter[], coverUrl?: string, videoUrl?: string): Promise<Blob> => {
+  const zip = new JSZip();
+  const bookId = generateUuid();
+
+  // 1. mimetype (must be first, uncompressed)
+  zip.file("mimetype", "application/epub+zip", { compression: "STORE" });
+
+  // 2. META-INF/container.xml
+  zip.folder("META-INF")?.file("container.xml", `<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+   <rootfiles>
+      <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+   </rootfiles>
+</container>`);
+
+  // 3. OEBPS folder
+  const oebps = zip.folder("OEBPS");
+  if (!oebps) throw new Error("Failed to create OEBPS folder");
+
+  let coverHref = '';
+  let coverMediaType = '';
+  if (coverUrl) {
+    try {
+        const imgResp = await fetch(coverUrl, { mode: 'cors' }).catch(() => null);
+        if (imgResp && imgResp.ok) {
+            const imgBlob = await imgResp.blob();
+            const extension = imgBlob.type.split('/')[1] || 'jpeg';
+            coverHref = `images/cover.${extension}`;
+            coverMediaType = imgBlob.type || 'image/jpeg';
+            oebps.folder('images')?.file(`cover.${extension}`, imgBlob);
+        } else {
+          console.warn("Could not fetch cover image. Skipping.");
+        }
+    } catch (e) {
+        console.warn("Failed to process cover image", e);
+    }
+  }
+
+  oebps.file("cover.xhtml", generateCoverPage(title, videoUrl, coverHref || undefined));
+  oebps.file("style.css", generateStyle());
+  oebps.file("nav.xhtml", generateNavXhtml(chapters));
+  oebps.file("toc.ncx", generateTocNcx(bookId, title, chapters));
+  oebps.file("content.opf", generateContentOpf(bookId, title, author, chapters, coverHref || undefined, coverMediaType || undefined));
+
+  chapters.forEach((chapter, index) => {
+    oebps.file(`chapter${index + 1}.xhtml`, generateChapterXhtml(chapter));
+  });
 
   return await zip.generateAsync({ type: "blob", mimeType: "application/epub+zip" });
 };

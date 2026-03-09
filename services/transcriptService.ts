@@ -7,6 +7,11 @@ export interface TranscriptResult {
   fallbackLang?: string;
 }
 
+interface ChapterMarker {
+  title: string;
+  start: number;
+}
+
 // Auto-detect chapters from transcript using gap/topic heuristics
 function autoChapterize(segments: TranscriptSegment[], videoTitle: string): Chapter[] {
   if (segments.length === 0) return [];
@@ -68,6 +73,40 @@ function autoChapterize(segments: TranscriptSegment[], videoTitle: string): Chap
   return chapters;
 }
 
+function buildChaptersFromMarkers(segments: TranscriptSegment[], markers: ChapterMarker[]): Chapter[] {
+  const normalizedMarkers = markers
+    .filter(marker => marker && marker.title && Number.isFinite(marker.start))
+    .sort((a, b) => a.start - b.start)
+    .filter((marker, index, array) => index === 0 || marker.start !== array[index - 1].start);
+
+  if (normalizedMarkers.length === 0) {
+    return [];
+  }
+
+  return normalizedMarkers
+    .map<Chapter | null>((marker, index) => {
+      const nextMarker = normalizedMarkers[index + 1];
+      const end = nextMarker ? nextMarker.start : Infinity;
+      const content = segments
+        .filter(segment => segment.start >= marker.start && segment.start < end)
+        .map(segment => segment.text)
+        .join(' ')
+        .trim();
+
+      if (!content) {
+        return null;
+      }
+
+      return {
+        index: index + 1,
+        title: marker.title,
+        content,
+        startTime: marker.start
+      };
+    })
+    .filter((chapter): chapter is Chapter => chapter !== null);
+}
+
 export async function fetchTranscript(videoUrl: string): Promise<TranscriptResult> {
   const response = await fetch(`/api/transcript?url=${encodeURIComponent(videoUrl)}`);
   
@@ -78,18 +117,18 @@ export async function fetchTranscript(videoUrl: string): Promise<TranscriptResul
 
   const data = await response.json();
   const segments: TranscriptSegment[] = data.segments || [];
+  const chapterMarkers: ChapterMarker[] = data.chapters || [];
 
   if (segments.length === 0) {
     throw new Error('No transcript segments found for this video');
   }
 
-  // Auto-generate chapters from segments
-  // In future, could also try to extract YouTube chapters from video description
-  const chapters = autoChapterize(segments, 'Transcript');
+  const chapters = buildChaptersFromMarkers(segments, chapterMarkers);
+  const finalChapters = chapters.length > 0 ? chapters : autoChapterize(segments, 'Transcript');
 
   return {
     segments,
-    chapters,
+    chapters: finalChapters,
     segmentCount: data.segmentCount,
     fallbackLang: data.fallbackLang
   };

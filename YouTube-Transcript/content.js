@@ -1,0 +1,766 @@
+// 存储转录数据
+let transcriptData = [];
+
+let currentActiveIndex = -1;
+let timeTrackingInterval = null;
+let videoElement = null;
+
+// 等待页面加载完成
+function init() {
+    try {
+        console.log('[YouTube转录] 初始化开始...', {
+            url: location.href,
+            readyState: document.readyState,
+            hasVideo: !!document.querySelector('video')
+        });
+        
+        // 检查是否在视频页面
+        if (!location.href.includes('/watch')) {
+            console.log('[YouTube转录] 不在视频页面，跳过初始化');
+            return;
+        }
+        
+        // 找到视频播放器
+        videoElement = document.querySelector('video');
+        
+        if (!videoElement) {
+            console.log('[YouTube转录] 未找到视频元素，1秒后重试...');
+            setTimeout(init, 1000);
+            return;
+        }
+        
+        console.log('[YouTube转录] 找到视频元素，创建侧边栏...');
+        
+        // 创建侧边栏
+        createSidebar();
+        
+        // 获取字幕数据
+        fetchTranscript();
+        
+        // 监听视频播放
+        videoElement.addEventListener('play', startTimeTracking);
+        videoElement.addEventListener('pause', stopTimeTracking);
+        videoElement.addEventListener('seeked', updateCurrentHighlight);
+        
+        console.log('[YouTube转录] 初始化完成！');
+    } catch (error) {
+        console.error('[YouTube转录] 初始化错误:', error);
+        // 重试初始化
+        setTimeout(init, 2000);
+    }
+}
+
+// 获取YouTube字幕
+async function fetchTranscript() {
+    try {
+        console.log('[YouTube转录] 开始获取字幕...');
+        showLoadingMessage('正在获取字幕...');
+        
+        // 方法1: 尝试使用YouTube的innertubeApi
+        const videoId = new URLSearchParams(window.location.search).get('v');
+        if (videoId) {
+            console.log('[YouTube转录] 视频ID:', videoId);
+            const success = await fetchTranscriptFromApi(videoId);
+            if (success) {
+                return;
+            }
+        }
+        
+        // 方法2: 从YouTube页面的ytInitialPlayerResponse获取
+        const ytInitialPlayerResponse = await getYtInitialPlayerResponse();
+        
+        if (ytInitialPlayerResponse) {
+            const captions = ytInitialPlayerResponse.captions;
+            
+            if (!captions || !captions.playerCaptionsTracklistRenderer) {
+                console.log('[YouTube转录] 此视频没有字幕');
+                showNoTranscriptMessage();
+                return;
+            }
+            
+            const captionTracks = captions.playerCaptionsTracklistRenderer.captionTracks;
+            
+            if (!captionTracks || captionTracks.length === 0) {
+                console.log('[YouTube转录] 没有可用的字幕轨道');
+                showNoTranscriptMessage();
+                return;
+            }
+            
+            // 填充语言选择器
+            populateLanguageSelector(captionTracks);
+            
+            // 优先选择中文字幕，否则选择第一个
+            let selectedTrack = captionTracks.find(track => 
+                track.languageCode === 'zh-Hans' || 
+                track.languageCode === 'zh-Hant' || 
+                track.languageCode === 'zh'
+            ) || captionTracks[0];
+            
+            await loadTranscriptTrack(selectedTrack);
+        } else {
+            console.log('[YouTube转录] 无法获取视频信息');
+            showNoTranscriptMessage();
+        }
+    } catch (error) {
+        console.error('[YouTube转录] 获取字幕失败:', error);
+        showNoTranscriptMessage();
+    }
+}
+
+// 使用YouTube内部API获取字幕
+async function fetchTranscriptFromApi(videoId) {
+    try {
+        console.log('[YouTube转录] 尝试使用API获取字幕...');
+        
+        // 构建字幕请求URL
+        const apiUrl = `https://www.youtube.com/youtubei/v1/get_transcript`;
+        
+        // 获取YouTube的API key和上下文
+        let apiKey = null;
+        let context = null;
+        
+        // 从ytcfg获取
+        if (window.ytcfg) {
+            apiKey = window.ytcfg.get('INNERTUBE_API_KEY');
+            context = window.ytcfg.get('INNERTUBE_CONTEXT');
+        }
+        
+        if (!apiKey) {
+            console.log('[YouTube转录] 未找到API Key，尝试下一种方法');
+            return false;
+        }
+        
+        console.log('[YouTube转录] 找到API Key，发起请求...');
+        
+        // 发送请求
+        const response = await fetch(`${apiUrl}?key=${apiKey}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                context: context || {
+                    client: {
+                        clientName: 'WEB',
+                        clientVersion: '2.20231219.01.00'
+                    }
+                },
+                params: btoa(`\n\x0b${videoId}`)
+            })
+        });
+        
+        if (!response.ok) {
+            console.error('[YouTube转录] API请求失败:', response.status);
+            return false;
+        }
+        
+        const data = await response.json();
+        console.log('[YouTube转录] API返回数据:', data);
+        
+        // 解析字幕数据
+        const transcriptData = parseTranscriptApiResponse(data);
+        if (transcriptData && transcriptData.length > 0) {
+            window.transcriptData = transcriptData;
+            renderTranscript();
+            console.log('[YouTube转录] API方法获取成功，共', transcriptData.length, '条');
+            return true;
+        }
+        
+        return false;
+    } catch (error) {
+        console.error('[YouTube转录] API方法失败:', error);
+        return false;
+    }
+}
+
+// 解析API返回的字幕数据
+function parseTranscriptApiResponse(data) {
+    try {
+        const actions = data?.actions;
+        if (!actions || actions.length === 0) {
+            return null;
+        }
+        
+        const transcriptData = [];
+        
+        // 遍历actions查找字幕数据
+        for (let action of actions) {
+            const segments = action?.updateEngagementPanelAction?.content
+                ?.transcriptRenderer?.content?.transcriptSearchPanelRenderer
+                ?.body?.transcriptSegmentListRenderer?.initialSegments;
+            
+            if (segments) {
+                for (let segment of segments) {
+                    const snippetData = segment?.transcriptSegmentRenderer?.snippet;
+                    const startMs = segment?.transcriptSegmentRenderer?.startMs;
+                    
+                    if (snippetData && startMs !== undefined) {
+                        const text = snippetData.runs?.map(run => run.text).join('') || '';
+                        const startSec = parseInt(startMs) / 1000;
+                        
+                        transcriptData.push({
+                            start: startSec,
+                            end: startSec + 5, // 估计时长
+                            text: text.trim()
+                        });
+                    }
+                }
+                break;
+            }
+        }
+        
+        return transcriptData.length > 0 ? transcriptData : null;
+    } catch (error) {
+        console.error('[YouTube转录] 解析API数据失败:', error);
+        return null;
+    }
+}
+
+// 获取ytInitialPlayerResponse
+function getYtInitialPlayerResponse() {
+    return new Promise((resolve) => {
+        console.log('[YouTube转录] 开始获取ytInitialPlayerResponse');
+        
+        // 方法1: 从window对象获取
+        if (window.ytInitialPlayerResponse) {
+            console.log('[YouTube转录] 从window对象获取成功');
+            resolve(window.ytInitialPlayerResponse);
+            return;
+        }
+        
+        // 方法2: 从ytinitialData获取
+        if (window.ytInitialData) {
+            console.log('[YouTube转录] 从ytInitialData尝试提取');
+            try {
+                // 从ytinitialData中提取player信息
+                const engagementPanels = window.ytInitialData?.engagementPanels || [];
+                console.log('[YouTube转录] engagementPanels:', engagementPanels.length);
+            } catch (e) {
+                console.error('[YouTube转录] 从ytinitialData提取失败:', e);
+            }
+        }
+        
+        // 方法3: 从页面script标签中提取
+        console.log('[YouTube转录] 尝试从Script标签提取');
+        const scripts = document.getElementsByTagName('script');
+        for (let script of scripts) {
+            const content = script.textContent;
+            if (content && content.includes('ytInitialPlayerResponse')) {
+                try {
+                    // 尝试多种模式
+                    const patterns = [
+                        /var ytInitialPlayerResponse\s*=\s*({.+?});/,
+                        /ytInitialPlayerResponse\s*=\s*({.+?});/,
+                        /"ytInitialPlayerResponse":\s*({.+?}),/
+                    ];
+                    
+                    for (let pattern of patterns) {
+                        const match = content.match(pattern);
+                        if (match && match[1]) {
+                            const parsed = JSON.parse(match[1]);
+                            console.log('[YouTube转录] 从Script提取成功');
+                            resolve(parsed);
+                            return;
+                        }
+                    }
+                } catch (e) {
+                    console.error('[YouTube转录] 解析Script失败:', e);
+                }
+            }
+        }
+        
+        // 方法4: 使用YouTube内部API
+        console.log('[YouTube转录] 尝试使用YouTube内部API');
+        setTimeout(async () => {
+            try {
+                // 获取视频ID
+                const videoId = new URLSearchParams(window.location.search).get('v');
+                if (videoId) {
+                    console.log('[YouTube转录] 视频ID:', videoId);
+                    
+                    // 尝试直接从页面获取
+                    if (window.ytInitialPlayerResponse) {
+                        resolve(window.ytInitialPlayerResponse);
+                        return;
+                    }
+                }
+            } catch (e) {
+                console.error('[YouTube转录] API请求失败:', e);
+            }
+            
+            resolve(null);
+        }, 2000);
+    });
+}
+
+// 解码HTML实体
+function decodeHTMLEntities(text) {
+    const textarea = document.createElement('textarea');
+    textarea.innerHTML = text;
+    return textarea.value
+        .replace(/\n/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+// 填充语言选择器
+function populateLanguageSelector(captionTracks) {
+    const languageSelect = document.getElementById('language-select');
+    if (!languageSelect || !captionTracks || captionTracks.length === 0) {
+        return;
+    }
+    
+    languageSelect.innerHTML = '';
+    
+    captionTracks.forEach((track, index) => {
+        const option = document.createElement('option');
+        option.value = index;
+        option.textContent = track.name?.simpleText || track.languageCode;
+        languageSelect.appendChild(option);
+    });
+    
+    // 如果有多种语言，显示选择器
+    if (captionTracks.length > 1) {
+        languageSelect.style.display = 'inline-block';
+    }
+}
+
+// 根据选择的轨道获取字幕
+async function fetchTranscriptWithTrack(trackIndex) {
+    try {
+        const ytInitialPlayerResponse = await getYtInitialPlayerResponse();
+        if (!ytInitialPlayerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks) {
+            return;
+        }
+        
+        const captionTracks = ytInitialPlayerResponse.captions.playerCaptionsTracklistRenderer.captionTracks;
+        const selectedTrack = captionTracks[trackIndex];
+        
+        if (selectedTrack) {
+            await loadTranscriptTrack(selectedTrack);
+        }
+    } catch (error) {
+        console.error('[YouTube转录] 加载选定字幕失败:', error);
+        showErrorMessage('加载字幕失败，请重试');
+    }
+}
+
+// 加载字幕轨道
+async function loadTranscriptTrack(selectedTrack) {
+    try {
+        console.log('[YouTube转录] 选择的字幕语言:', selectedTrack.name?.simpleText || selectedTrack.languageCode);
+        
+        // 显示加载状态
+        showLoadingMessage('正在加载字幕...');
+        
+        // 获取字幕URL
+        const transcriptUrl = selectedTrack.baseUrl;
+        
+        // 下载并解析字幕
+        const response = await fetch(transcriptUrl);
+        const xmlText = await response.text();
+        
+        // 解析XML字幕
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(xmlText, 'text/xml');
+        const textElements = xmlDoc.getElementsByTagName('text');
+        
+        transcriptData = [];
+        
+        for (let i = 0; i < textElements.length; i++) {
+            const element = textElements[i];
+            const start = parseFloat(element.getAttribute('start'));
+            const duration = parseFloat(element.getAttribute('dur') || '0');
+            const text = decodeHTMLEntities(element.textContent);
+            
+            if (text.trim()) {  // 只添加非空文本
+                transcriptData.push({
+                    start: start,
+                    end: start + duration,
+                    text: text
+                });
+            }
+        }
+        
+        console.log('[YouTube转录] 成功获取字幕，共', transcriptData.length, '条');
+        
+        // 重新渲染
+        renderTranscript();
+    } catch (error) {
+        console.error('[YouTube转录] 加载字幕失败:', error);
+        showErrorMessage('字幕加载失败');
+    }
+}
+
+// 显示加载消息
+function showLoadingMessage(message = '加载中...') {
+    const container = document.getElementById('transcript-content');
+    if (container) {
+        container.innerHTML = `
+            <div style="padding: 20px; text-align: center; color: #aaa;">
+                <div style="margin-bottom: 10px;">⏳</div>
+                <p>${message}</p>
+            </div>
+        `;
+    }
+}
+
+// 显示错误消息
+function showErrorMessage(message) {
+    const container = document.getElementById('transcript-content');
+    if (container) {
+        container.innerHTML = `
+            <div style="padding: 20px; text-align: center; color: #ff6b6b;">
+                <div style="margin-bottom: 10px;">❌</div>
+                <p>${message}</p>
+                <button onclick="fetchTranscript()" style="margin-top: 10px; padding: 8px 16px; background: #3f3f3f; color: #fff; border: none; border-radius: 4px; cursor: pointer;">重试</button>
+            </div>
+        `;
+    }
+}
+
+// 显示无字幕消息
+function showNoTranscriptMessage() {
+    const container = document.getElementById('transcript-content');
+    if (container) {
+        container.innerHTML = `
+            <div style="padding: 20px; text-align: center; color: #aaa;">
+                <div style="margin-bottom: 10px;">📝</div>
+                <p>此视频没有可用的字幕</p>
+                <p style="font-size: 12px; margin-top: 10px;">请尝试其他有字幕的视频</p>
+            </div>
+        `;
+    }
+}
+
+// 创建侧边栏
+function createSidebar() {
+    try {
+        // 检查是否已存在
+        const existingSidebar = document.getElementById('transcript-sidebar');
+        if (existingSidebar) {
+            console.log('[YouTube转录] 侧边栏已存在，先移除');
+            existingSidebar.remove();
+        }
+    
+        console.log('[YouTube转录] 创建侧边栏元素...');
+        
+        // 创建侧边栏容器
+        const sidebar = document.createElement('div');
+        sidebar.id = 'transcript-sidebar';
+        sidebar.className = 'transcript-sidebar';
+        
+        // 使用内联样式确保显示
+        sidebar.style.cssText = `
+            position: fixed !important;
+            top: 56px !important;
+            right: 0 !important;
+            width: 400px !important;
+            height: calc(100vh - 56px) !important;
+            background-color: #0f0f0f !important;
+            border-left: 1px solid #3f3f3f !important;
+            z-index: 999999 !important;
+            display: flex !important;
+            flex-direction: column !important;
+            box-shadow: -2px 0 10px rgba(0, 0, 0, 0.5) !important;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+        `;
+        
+        // 创建头部
+        const header = document.createElement('div');
+        header.className = 'transcript-header';
+        header.style.cssText = `
+            display: flex !important;
+            justify-content: space-between !important;
+            align-items: center !important;
+            padding: 16px 20px !important;
+            border-bottom: 1px solid #3f3f3f !important;
+            background-color: #212121 !important;
+            color: #f1f1f1 !important;
+        `;
+        
+        header.innerHTML = `
+            <h3 style="margin: 0; font-size: 16px; color: #f1f1f1;">转录文本</h3>
+            <div class="header-controls" style="display: flex; align-items: center; gap: 8px;">
+                <select id="language-select" class="language-select" style="display: none; background: #3f3f3f; border: 1px solid #555; color: #f1f1f1; padding: 4px 8px; border-radius: 4px; font-size: 12px;"></select>
+                <button id="refresh-transcript" class="control-btn" title="刷新字幕" style="background: none; border: none; color: #aaa; cursor: pointer; font-size: 14px; padding: 4px 8px; border-radius: 4px;">↻</button>
+                <button id="toggle-sidebar" class="toggle-btn" style="background: none; border: none; color: #aaa; cursor: pointer; font-size: 14px; padding: 4px 8px; border-radius: 4px;">收起</button>
+            </div>
+        `;
+        
+        // 创建内容区域
+        const content = document.createElement('div');
+        content.className = 'transcript-content';
+        content.id = 'transcript-content';
+        content.style.cssText = `
+            flex: 1 !important;
+            overflow-y: auto !important;
+            padding: 12px !important;
+            color: #f1f1f1 !important;
+        `;
+        
+        sidebar.appendChild(header);
+        sidebar.appendChild(content);
+        document.body.appendChild(sidebar);
+        
+        console.log('[YouTube转录] 侧边栏已添加到页面', sidebar);
+        
+        // 渲染转录文本
+        renderTranscript();
+        
+        // 绑定事件
+        bindSidebarEvents();
+        
+    } catch (error) {
+        console.error('[YouTube转录] 创建侧边栏失败:', error);
+    }
+}
+
+// 绑定侧边栏事件
+function bindSidebarEvents() {
+    try {
+        // 绑定收起/展开按钮
+        const toggleBtn = document.getElementById('toggle-sidebar');
+        if (toggleBtn) {
+            toggleBtn.addEventListener('click', toggleSidebar);
+        }
+        
+        // 绑定刷新按钮
+        const refreshBtn = document.getElementById('refresh-transcript');
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', () => {
+                fetchTranscript();
+            });
+        }
+        
+        // 绑定语言选择
+        const languageSelect = document.getElementById('language-select');
+        if (languageSelect) {
+            languageSelect.addEventListener('change', (e) => {
+                const selectedTrack = e.target.value;
+                if (selectedTrack) {
+                    fetchTranscriptWithTrack(selectedTrack);
+                }
+            });
+        }
+        
+        console.log('[YouTube转录] 事件绑定完成');
+    } catch (error) {
+        console.error('[YouTube转录] 事件绑定失败:', error);
+    }
+}
+
+// 渲染转录文本
+function renderTranscript() {
+    const container = document.getElementById('transcript-content');
+    if (!container) return;
+    
+    container.innerHTML = '';
+    
+    if (transcriptData.length === 0) {
+        // 如果没有数据且容器为空，显示加载状态
+        if (!container.innerHTML || container.innerHTML.trim() === '') {
+            showLoadingMessage('正在加载字幕...');
+        }
+        return;
+    }
+    
+    transcriptData.forEach((item, index) => {
+        const transcriptItem = document.createElement('div');
+        transcriptItem.className = 'transcript-item';
+        transcriptItem.dataset.index = index;
+        transcriptItem.dataset.start = item.start;
+        
+        // 添加内联样式
+        transcriptItem.style.cssText = `
+            padding: 12px !important;
+            margin-bottom: 8px !important;
+            border-radius: 8px !important;
+            cursor: pointer !important;
+            transition: background-color 0.2s !important;
+            color: #f1f1f1 !important;
+        `;
+        
+        const timestamp = document.createElement('span');
+        timestamp.className = 'timestamp';
+        timestamp.textContent = formatTime(item.start);
+        timestamp.style.cssText = `
+            display: inline-block !important;
+            font-size: 12px !important;
+            color: #aaa !important;
+            margin-right: 8px !important;
+            font-family: 'Courier New', monospace !important;
+            min-width: 45px !important;
+        `;
+        
+        const text = document.createElement('span');
+        text.className = 'text';
+        text.textContent = item.text;
+        text.style.cssText = `
+            display: inline !important;
+            line-height: 1.6 !important;
+        `;
+        
+        transcriptItem.appendChild(timestamp);
+        transcriptItem.appendChild(text);
+        
+        // 添加hover效果
+        transcriptItem.addEventListener('mouseenter', () => {
+            if (!transcriptItem.classList.contains('active')) {
+                transcriptItem.style.backgroundColor = '#3f3f3f';
+            }
+        });
+        
+        transcriptItem.addEventListener('mouseleave', () => {
+            if (!transcriptItem.classList.contains('active')) {
+                transcriptItem.style.backgroundColor = 'transparent';
+            }
+        });
+        
+        // 点击跳转
+        transcriptItem.addEventListener('click', () => {
+            if (videoElement) {
+                videoElement.currentTime = item.start;
+                highlightTranscript(index);
+            }
+        });
+        
+        container.appendChild(transcriptItem);
+    });
+}
+
+// 格式化时间
+function formatTime(seconds) {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+}
+
+// 开始时间跟踪
+function startTimeTracking() {
+    stopTimeTracking();
+    timeTrackingInterval = setInterval(() => {
+        if (videoElement) {
+            updateTranscriptHighlight(videoElement.currentTime);
+        }
+    }, 100);
+}
+
+// 停止时间跟踪
+function stopTimeTracking() {
+    if (timeTrackingInterval) {
+        clearInterval(timeTrackingInterval);
+        timeTrackingInterval = null;
+    }
+}
+
+// 更新高亮
+function updateTranscriptHighlight(currentTime) {
+    const currentIndex = transcriptData.findIndex((item, index) => {
+        const nextItem = transcriptData[index + 1];
+        return currentTime >= item.start && (!nextItem || currentTime < nextItem.start);
+    });
+    
+    if (currentIndex !== -1 && currentIndex !== currentActiveIndex) {
+        highlightTranscript(currentIndex);
+    }
+}
+
+// 手动更新当前高亮
+function updateCurrentHighlight() {
+    if (videoElement) {
+        updateTranscriptHighlight(videoElement.currentTime);
+    }
+}
+
+// 高亮指定项
+function highlightTranscript(index) {
+    try {
+        // 移除之前的高亮
+        const previousActive = document.querySelector('.transcript-item.active');
+        if (previousActive) {
+            previousActive.classList.remove('active');
+            previousActive.style.backgroundColor = 'transparent';
+            const prevTimestamp = previousActive.querySelector('.timestamp');
+            if (prevTimestamp) {
+                prevTimestamp.style.color = '#aaa';
+            }
+        }
+        
+        // 添加新的高亮
+        const items = document.querySelectorAll('.transcript-item');
+        if (items[index]) {
+            items[index].classList.add('active');
+            items[index].style.backgroundColor = '#065fd4';
+            items[index].style.color = '#fff';
+            
+            const timestamp = items[index].querySelector('.timestamp');
+            if (timestamp) {
+                timestamp.style.color = '#fff';
+            }
+            
+            // 滚动到可视区域
+            const sidebar = document.getElementById('transcript-content');
+            if (sidebar) {
+                items[index].scrollIntoView({
+                    behavior: 'smooth',
+                    block: 'center'
+                });
+            }
+        }
+        
+        currentActiveIndex = index;
+    } catch (error) {
+        console.error('[YouTube转录] 高亮失败:', error);
+    }
+}
+
+// 切换侧边栏显示/隐藏
+function toggleSidebar() {
+    const sidebar = document.getElementById('transcript-sidebar');
+    const btn = document.getElementById('toggle-sidebar');
+    
+    if (sidebar.classList.contains('collapsed')) {
+        sidebar.classList.remove('collapsed');
+        btn.textContent = '收起';
+    } else {
+        sidebar.classList.add('collapsed');
+        btn.textContent = '展开';
+    }
+}
+
+// 初始化
+console.log('[YouTube转录] 插件加载，readyState:', document.readyState);
+
+// 等待页面完全加载
+function initWhenReady() {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => {
+            setTimeout(init, 1000); // 等待YouTube加载
+        });
+    } else {
+        setTimeout(init, 1000); // 立即初始化但给一些缓冲时间
+    }
+}
+
+initWhenReady();
+
+// 监听URL变化（YouTube单页应用导航）
+let lastUrl = location.href;
+let urlObserver = new MutationObserver(() => {
+    const url = location.href;
+    if (url !== lastUrl) {
+        lastUrl = url;
+        if (url.includes('/watch')) {
+            console.log('[YouTube转录] 检测到页面导航，重新初始化...');
+            // 清理旧侧边栏
+            const existingSidebar = document.getElementById('transcript-sidebar');
+            if (existingSidebar) {
+                existingSidebar.remove();
+            }
+            setTimeout(init, 2000); // 给更多时间加载
+        }
+    }
+});
+
+urlObserver.observe(document, { subtree: true, childList: true });

@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>视频转录侧边栏</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- 左侧视频区域 -->
+        <div class="video-section">
+            <div id="player"></div>
+        </div>
+        
+        <!-- 右侧转录文本区域 -->
+        <div class="transcript-section">
+            <h2>转录文本</h2>
+            <div id="transcript" class="transcript-content">
+                <!-- 转录文本将动态加载 -->
+            </div>
+        </div>
+    </div>
+
+    <!-- YouTube IFrame API -->
+    <script src="https://www.youtube.com/iframe_api"></script>
+    <script src="script.js"></script>
+</body>
+</html>

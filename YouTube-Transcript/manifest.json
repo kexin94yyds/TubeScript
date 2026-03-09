@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube 转录侧边栏",
+  "version": "1.0",
+  "description": "在YouTube视频右侧显示转录文本，支持高亮跟随和点击跳转",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://*.youtube.com/*",
+    "https://*.googlevideo.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.youtube.com/watch*",
+        "https://youtube.com/watch*",
+        "https://m.youtube.com/watch*"
+      ],
+      "js": ["jszip.min.js", "epub-generator.js", "content-dom.js"],
+      "css": ["sidebar.css"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_title": "显示/隐藏YouTube转录侧边栏",
+    "default_icon": {
+      "16": "icon.png",
+      "48": "icon.png",
+      "128": "icon.png"
+    }
+  },
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  }
+}

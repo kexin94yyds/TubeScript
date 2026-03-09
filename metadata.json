@@ -1,0 +1,5 @@
+{
+  "name": "TubeScript Splitter",
+  "description": "A NotebookLM-style tool to convert YouTube videos to text, generate EPUBs, and slice them into structured Markdown/HTML/TXT files using advanced processing logic.",
+  "requestFramePermissions": []
+}

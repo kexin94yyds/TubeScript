@@ -375,16 +375,95 @@ function generateEpubCoverPage(title, videoUrl, coverHref) {
   const titleHtml = videoUrl
     ? `<a href="${escapeXml(videoUrl)}" style="color:inherit;text-decoration:none;">${escapeXml(title)}</a>`
     : escapeXml(title);
-  const imageHtml = coverHref
-    ? `<div style="text-align:center;margin:0 auto 1.5em"><img src="${escapeXml(coverHref)}" alt="cover" style="width:60%;max-width:300px;height:auto;display:block;margin:0 auto"/></div>`
+
+  const copyAction = videoUrl
+    ? escapeXml(`navigator.clipboard.writeText(${JSON.stringify(videoUrl)})`)
     : '';
+  const copyBtnHtml = videoUrl
+    ? `\n      <button class="copy-btn" onclick="${copyAction}">Copy</button>`
+    : '';
+
+  const imageHtml = coverHref
+    ? `\n    <div class="cover-image-container">\n      <img src="${escapeXml(coverHref)}" alt="封面"/>\n    </div>`
+    : '';
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml">
-<head><meta charset="UTF-8"/><title>${escapeXml(title)}</title></head>
-<body style="text-align:center;padding:2em 1em">
-  ${imageHtml}
-  <h1 style="font-size:1.2em;font-family:PingFang SC,Microsoft YaHei,sans-serif;color:#1a1a1a">${titleHtml}</h1>
+<head>
+  <meta charset="UTF-8"/>
+  <title>${escapeXml(title)}</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      text-align: center;
+      background: #fff;
+    }
+    .page-wrapper {
+      padding: 2em 1em;
+      box-sizing: border-box;
+    }
+    .cover-image-container {
+      margin: 0 auto 1.5em auto;
+      text-align: center;
+    }
+    img {
+      width: 60%;
+      max-width: 300px;
+      height: auto;
+      display: block;
+      margin: 0 auto;
+    }
+    .title-section {
+      margin: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+    }
+    h1 {
+      font-size: 1.2em;
+      margin: 0;
+      line-height: 1.4;
+      font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: #1a1a1a;
+    }
+    .title-link {
+      color: inherit;
+      text-decoration: none;
+    }
+    .title-link:hover { color: #3b82f6; }
+    .copy-btn {
+      padding: 3px 12px;
+      font-size: 0.85em;
+      color: #333;
+      background-color: #ffffff;
+      border: 1px solid #d1d1d1;
+      border-radius: 6px;
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      transition: all 0.1s ease;
+    }
+    .copy-btn:hover {
+      background-color: #f5f5f5;
+    }
+    .copy-btn:active {
+      background-color: #ebebeb;
+      box-shadow: none;
+      transform: scale(0.98);
+    }
+  </style>
+</head>
+<body>
+  <div class="page-wrapper">${imageHtml}
+    <div class="title-section">
+      <h1>${titleHtml}</h1>${copyBtnHtml}
+    </div>
+  </div>
 </body>
 </html>`;
 }
